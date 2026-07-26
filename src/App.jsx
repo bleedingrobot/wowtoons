@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import Layout from "./components/Layout";
+import { useAuth } from "./context/AuthContext";
 import DashboardPage from "./pages/Dashboard";
 import CharactersPage from "./pages/Characters";
 import LootPage from "./pages/Loot";
@@ -15,6 +16,46 @@ import RogueSimPage from "./pages/RogueSim";
 import MageSimPage from "./pages/MageSim";
 
 function App() {
+  const { user, loading, hasFirebaseConfig, signInWithGoogle } = useAuth();
+
+  if (loading) {
+    return (
+      <Layout>
+        <section className="panel">
+          <h2>Loading</h2>
+          <p className="subtitle">Checking your sign-in session...</p>
+        </section>
+      </Layout>
+    );
+  }
+
+  if (!hasFirebaseConfig) {
+    return (
+      <Layout>
+        <section className="panel">
+          <h2>Configuration Required</h2>
+          <p className="subtitle">Firebase env vars are missing. Copy .env.example into .env.local.</p>
+        </section>
+      </Layout>
+    );
+  }
+
+  if (!user) {
+    return (
+      <Layout>
+        <section className="panel">
+          <h2>Sign In Required</h2>
+          <p className="subtitle">Sign in with Google to use the page.</p>
+          <div className="row-actions">
+            <button type="button" onClick={signInWithGoogle}>
+              Sign In with Google
+            </button>
+          </div>
+        </section>
+      </Layout>
+    );
+  }
+
   return (
     <Layout>
       <Routes>

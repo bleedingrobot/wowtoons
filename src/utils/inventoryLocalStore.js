@@ -19,13 +19,18 @@ function openDb() {
   });
 }
 
-export async function saveInventoryItems(items) {
+export async function saveInventoryItems(items, meta = {}) {
   const db = await openDb();
+  const safeMeta = meta && typeof meta === "object" ? meta : {};
   await new Promise((resolve, reject) => {
     const tx = db.transaction(INVENTORY_STORE, "readwrite");
     tx.objectStore(INVENTORY_STORE).put(items, INVENTORY_KEY);
     tx.objectStore(INVENTORY_STORE).put(
-      { syncedAt: new Date().toISOString(), count: items.length },
+      {
+        syncedAt: new Date().toISOString(),
+        count: items.length,
+        ...safeMeta
+      },
       INVENTORY_META_KEY
     );
     tx.oncomplete = resolve;

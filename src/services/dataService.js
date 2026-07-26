@@ -141,28 +141,32 @@ export function subscribeInventorySnapshot(uid, callback) {
   }
 
   return onSnapshot(doc(db, INVENTORY_SNAPSHOTS, uid), async (snapshot) => {
-    const items = snapshot.exists() && Array.isArray(snapshot.data()?.items)
-      ? snapshot.data().items
+    const snapshotData = snapshot.exists() ? snapshot.data() : null;
+    const items = snapshotData && Array.isArray(snapshotData.items)
+      ? snapshotData.items
       : [];
+    const meta = snapshotData && typeof snapshotData.meta === "object" ? snapshotData.meta : {};
 
-    await saveInventoryItems(items);
+    await saveInventoryItems(items, meta);
     callback(items);
     dispatchInventoryUpdated();
   });
 }
 
-export async function replaceInventoryItems(uid, items) {
+export async function replaceInventoryItems(uid, items, meta = {}) {
   const safeItems = Array.isArray(items) ? items : [];
+  const safeMeta = meta && typeof meta === "object" ? meta : {};
 
   if (db && uid) {
     await setDoc(doc(db, INVENTORY_SNAPSHOTS, uid), {
       userId: uid,
       items: safeItems,
+      meta: safeMeta,
       updatedAt: new Date().toISOString()
     });
   }
 
-  await saveInventoryItems(safeItems);
+  await saveInventoryItems(safeItems, safeMeta);
   dispatchInventoryUpdated();
 }
 

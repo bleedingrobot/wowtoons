@@ -31,6 +31,7 @@ import { parseDataStoreCharacters } from "../utils/dataStoreCharactersParser";
 import {
   characterProfileKey,
   detectDataStoreSourceType,
+  parseDataStoreCharacterIndexMap,
   mergeCharacterProfiles,
   mergeInventoryProfiles
 } from "../utils/dataStoreProfileHelpers";
@@ -53,8 +54,16 @@ const NIT_PATHS_KEY = "nit_savedvariables_paths";
 const NIT_SELECTED_FILE_INDEXES_KEY = "nit_selected_file_indexes";
 const BAGNON_PATHS_KEY = "bagnon_savedvariables_paths";
 const BAGNON_SELECTED_FILE_INDEXES_KEY = "bagnon_selected_file_indexes";
+const NOVA_SYNC_ACCOUNT_FILTERS_KEY = "nit_sync_account_filters";
+const INVENTORY_SYNC_ACCOUNT_FILTERS_KEY = "inventory_sync_account_filters";
+const INVENTORY_SYNC_HISTORY_KEY = "inventory_sync_history_by_account";
 const NOVA_EXPECTED_FILES = ["NovaInstanceTracker.lua", "NovaWorldBuffs.lua"];
-const INVENTORY_EXPECTED_FILES = ["DataStore_Containers.lua", "DataStore_Inventory.lua", "DataStore_Characters.lua"];
+const INVENTORY_EXPECTED_FILES = [
+  "DataStore_Containers.lua",
+  "DataStore_Inventory.lua",
+  "DataStore_Characters.lua",
+  "DataStore.lua"
+];
 
 function normalize(value) {
   return String(value || "").trim().toLowerCase();
@@ -62,6 +71,18 @@ function normalize(value) {
 
 function characterKey(name, realm) {
   return `${normalize(name)}|${normalize(realm)}`;
+}
+
+function normalizeLoose(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+function characterLooseKey(name, realm) {
+  return `${normalizeLoose(name)}|${normalizeLoose(realm)}`;
 }
 
 function extractAccountFromPath(path) {
@@ -79,6 +100,15 @@ function getUniqueAccountHint(paths) {
 function getFileLabelHint(paths) {
   const labels = Array.from(new Set(paths.map((path) => String(path || "").trim()).filter(Boolean)));
   return labels.length === 1 ? labels[0] : "";
+}
+
+function getDefaultAccountLabel(accounts, userEmail) {
+  if (Array.isArray(accounts) && accounts.length === 1) {
+    return String(accounts[0]?.battleNetId || "").trim();
+  }
+
+  const emailLocalPart = String(userEmail || "").split("@")[0]?.trim();
+  return emailLocalPart || "";
 }
 
 function summarizeLinkedFiles(files, expectedFiles) {
@@ -100,12 +130,123 @@ function summarizeLinkedFiles(files, expectedFiles) {
   };
 }
 
+function getMissingExpectedFilesFromSources(sources, expectedFiles) {
+  const selectedNames = (sources || [])
+    .map((source) => String(source?.fileName || "").trim().toLowerCase())
+    .filter(Boolean);
+  const selectedSet = new Set(selectedNames);
+  return expectedFiles.filter((expectedName) => !selectedSet.has(String(expectedName || "").toLowerCase()));
+}
+
+function getMissingExpectedFilesByAccountFromSources(sources, expectedFiles) {
+  const byAccount = new Map();
+
+  (sources || []).forEach((source) => {
+    const accountLabel = String(source?.accountHintName || "").trim() || "(unlabeled account)";
+    if (!byAccount.has(accountLabel)) {
+      byAccount.set(accountLabel, new Set());
+    }
+    byAccount.get(accountLabel).add(String(source?.fileName || "").trim().toLowerCase());
+  });
+
+  return [...byAccount.entries()]
+    .map(([accountLabel, selectedNames]) => ({
+      accountLabel,
+      missing: expectedFiles.filter((expectedName) => !selectedNames.has(String(expectedName || "").toLowerCase()))
+    }))
+    .filter((entry) => entry.missing.length)
+    .sort((a, b) => a.accountLabel.localeCompare(b.accountLabel));
+}
+
+function formatInventoryDiagnostics(details) {
+  const parts = [];
+
+  if (details.stage) {
+    parts.push(`stage=${details.stage}`);
+  }
+
+  if (typeof details.totalSources === "number") {
+    parts.push(`sources=${details.totalSources}`);
+  }
+
+  if (details.sourceBreakdown) {
+    const breakdown = Object.entries(details.sourceBreakdown)
+      .map(([key, value]) => `${key}:${value}`)
+      .join(",");
+    parts.push(`parsed={${breakdown}}`);
+  }
+
+  if (typeof details.characterIndexMapSize === "number") {
+    parts.push(`indexMap=${details.characterIndexMapSize}`);
+  }
+
+  if (typeof details.requiresCoreMap === "boolean") {
+    parts.push(`requiresCoreMap=${details.requiresCoreMap}`);
+  }
+
+  if (typeof details.unresolvedProfiles === "number") {
+    parts.push(`unresolvedProfiles=${details.unresolvedProfiles}`);
+  }
+
+  if (typeof details.unresolvedItems === "number") {
+    parts.push(`unresolvedItems=${details.unresolvedItems}`);
+  }
+
+  if (details.unresolvedProfileSample) {
+    parts.push(`unresolvedProfileSample=${details.unresolvedProfileSample}`);
+  }
+
+  if (details.unresolvedItemSample) {
+    parts.push(`unresolvedItemSample=${details.unresolvedItemSample}`);
+  }
+
+  if (Array.isArray(details.files) && details.files.length) {
+    const fileSummary = details.files
+      .map((file) => `${file.fileName || "unknown"}:${file.sourceType || "unknown"}:${file.parsedCount || 0}`)
+      .join("|");
+    parts.push(`files=${fileSummary}`);
+  }
+
+  return parts.join(" ; ");
+}
+
+function downloadJsonFile(fileName, payload) {
+  const json = JSON.stringify(payload, null, 2);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
+}
+
+function readInventorySyncHistory() {
+  try {
+    const raw = localStorage.getItem(INVENTORY_SYNC_HISTORY_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveInventorySyncHistory(historyByAccount) {
+  localStorage.setItem(INVENTORY_SYNC_HISTORY_KEY, JSON.stringify(historyByAccount || {}));
+}
+
 function SettingsPage() {
   const { user, hasFirebaseConfig, signInWithGoogle, signOutUser } = useAuth();
   const { data } = useUserCollections(user?.uid);
   const [nitPaths, setNitPaths] = useState([]);
   const [syncMessage, setSyncMessage] = useState("");
   const [bagnonSyncMessage, setBagnonSyncMessage] = useState("");
+  const [bagnonIntegrityReport, setBagnonIntegrityReport] = useState(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isBagnonSyncing, setIsBagnonSyncing] = useState(false);
   const [isDeletingAll, setIsDeletingAll] = useState(false);
@@ -124,6 +265,11 @@ function SettingsPage() {
   const [bagnonConnectedFiles, setBagnonConnectedFiles] = useState([]);
   const [pendingBagnonConnectHandles, setPendingBagnonConnectHandles] = useState([]);
   const [pendingBagnonAccountName, setPendingBagnonAccountName] = useState("");
+  const [bulkNovaAccountName, setBulkNovaAccountName] = useState("");
+  const [bulkBagnonAccountName, setBulkBagnonAccountName] = useState("");
+  const [selectedNovaSyncAccounts, setSelectedNovaSyncAccounts] = useState([]);
+  const [selectedInventorySyncAccounts, setSelectedInventorySyncAccounts] = useState([]);
+  const [inventorySyncHistoryByAccount, setInventorySyncHistoryByAccount] = useState({});
   const [isClearingInventory, setIsClearingInventory] = useState(false);
   const [requiredFilesCheckMessage, setRequiredFilesCheckMessage] = useState("");
   const [requiredFilesCheckRun, setRequiredFilesCheckRun] = useState(false);
@@ -166,6 +312,26 @@ function SettingsPage() {
 
   const inventoryLinkedSummary = useMemo(
     () => summarizeLinkedFiles(bagnonConnectedFiles, INVENTORY_EXPECTED_FILES),
+    [bagnonConnectedFiles]
+  );
+
+  const novaAccountOptions = useMemo(
+    () => Array.from(
+      new Set(
+        connectedFiles
+          .map((item) => String(item.accountName || "").trim() || "(unlabeled account)")
+      )
+    ).sort((a, b) => a.localeCompare(b)),
+    [connectedFiles]
+  );
+
+  const inventoryAccountOptions = useMemo(
+    () => Array.from(
+      new Set(
+        bagnonConnectedFiles
+          .map((item) => String(item.accountName || "").trim() || "(unlabeled account)")
+      )
+    ).sort((a, b) => a.localeCompare(b)),
     [bagnonConnectedFiles]
   );
 
@@ -263,6 +429,34 @@ function SettingsPage() {
     }
   }, []);
 
+  useEffect(() => {
+    try {
+      const rawNovaFilters = localStorage.getItem(NOVA_SYNC_ACCOUNT_FILTERS_KEY);
+      if (rawNovaFilters) {
+        const parsedNovaFilters = JSON.parse(rawNovaFilters);
+        if (Array.isArray(parsedNovaFilters)) {
+          setSelectedNovaSyncAccounts(parsedNovaFilters.filter((entry) => String(entry || "").trim()));
+        }
+      }
+    } catch {
+      // Ignore invalid stored sync account filter format.
+    }
+
+    try {
+      const rawInventoryFilters = localStorage.getItem(INVENTORY_SYNC_ACCOUNT_FILTERS_KEY);
+      if (rawInventoryFilters) {
+        const parsedInventoryFilters = JSON.parse(rawInventoryFilters);
+        if (Array.isArray(parsedInventoryFilters)) {
+          setSelectedInventorySyncAccounts(parsedInventoryFilters.filter((entry) => String(entry || "").trim()));
+        }
+      }
+    } catch {
+      // Ignore invalid stored sync account filter format.
+    }
+
+    setInventorySyncHistoryByAccount(readInventorySyncHistory());
+  }, []);
+
   const hydrateConnectedFiles = useCallback(() => {
     if (!window.indexedDB) {
       return;
@@ -302,6 +496,28 @@ function SettingsPage() {
   useEffect(() => {
     hydrateBagnonConnectedFiles();
   }, [hydrateBagnonConnectedFiles]);
+
+  useEffect(() => {
+    setSelectedNovaSyncAccounts((prev) => {
+      const available = new Set(novaAccountOptions.map((label) => normalize(label)));
+      return prev.filter((label) => available.has(normalize(label)));
+    });
+  }, [novaAccountOptions]);
+
+  useEffect(() => {
+    setSelectedInventorySyncAccounts((prev) => {
+      const available = new Set(inventoryAccountOptions.map((label) => normalize(label)));
+      return prev.filter((label) => available.has(normalize(label)));
+    });
+  }, [inventoryAccountOptions]);
+
+  useEffect(() => {
+    localStorage.setItem(NOVA_SYNC_ACCOUNT_FILTERS_KEY, JSON.stringify(selectedNovaSyncAccounts));
+  }, [selectedNovaSyncAccounts]);
+
+  useEffect(() => {
+    localStorage.setItem(INVENTORY_SYNC_ACCOUNT_FILTERS_KEY, JSON.stringify(selectedInventorySyncAccounts));
+  }, [selectedInventorySyncAccounts]);
 
   const savePaths = (paths) => {
     setNitPaths(paths);
@@ -595,9 +811,14 @@ function SettingsPage() {
         return;
       }
 
+      const defaultAccountLabel = getDefaultAccountLabel(data.accounts, user?.email);
       setPendingConnectHandles(handles);
-      setPendingAccountName(getUniqueAccountHint(nitPaths) || getUniqueAccountHint(connectedFiles.map((item) => item.accountName)));
-      setSyncMessage("Set account name for selected files, then confirm.");
+      setPendingAccountName(
+        getUniqueAccountHint(nitPaths)
+        || getUniqueAccountHint(connectedFiles.map((item) => item.accountName))
+        || defaultAccountLabel
+      );
+      setSyncMessage("Select or type an account name for selected files, then confirm.");
     } catch {
       // User cancelled picker.
     }
@@ -614,7 +835,8 @@ function SettingsPage() {
     }
 
     try {
-      const accountHintName = pendingAccountName.trim();
+      const defaultAccountLabel = getDefaultAccountLabel(data.accounts, user?.email);
+      const accountHintName = pendingAccountName.trim() || defaultAccountLabel;
       const existingHandles = await loadConnectedHandles();
       const existingMeta = readConnectedFileMeta();
 
@@ -649,16 +871,117 @@ function SettingsPage() {
 
     setIsBagnonSyncing(true);
     setBagnonSyncMessage("Sync in progress...");
+    setBagnonIntegrityReport(null);
+
+    let syncStage = "initializing";
+    const syncDiagnostics = {
+      totalSources: Array.isArray(sources) ? sources.length : 0,
+      sourceBreakdown: {
+        containers: 0,
+        inventory: 0,
+        characters: 0,
+        core: 0,
+        unknown: 0
+      },
+      files: [],
+      characterIndexMapSize: 0,
+      requiresCoreMap: false,
+      unresolvedProfiles: 0,
+      unresolvedItems: 0,
+      unresolvedProfileSample: "",
+      unresolvedItemSample: ""
+    };
+    const integrityReport = {
+      status: "in-progress",
+      stage: syncStage,
+      reason: "",
+      totals: {
+        itemStacks: 0,
+        totalItemQuantity: 0,
+        uniqueItems: 0,
+        ownersWithItems: 0,
+        snapshotCharacters: 0,
+        equipmentProfiles: 0,
+        characterProfiles: 0
+      },
+      sourceBreakdown: syncDiagnostics.sourceBreakdown,
+      files: syncDiagnostics.files,
+      unresolvedProfiles: 0,
+      unresolvedItems: 0,
+      indexedAccountLabels: [],
+      accountBreakdown: [],
+      warnings: []
+    };
+
+    const updateInventorySyncHistory = ({
+      accountLabels = [],
+      status,
+      stage,
+      reason,
+      unresolvedProfiles = 0,
+      unresolvedItems = 0,
+      totals,
+      warnings = []
+    }) => {
+      const next = {
+        ...inventorySyncHistoryByAccount
+      };
+      const labels = Array.isArray(accountLabels) && accountLabels.length
+        ? accountLabels
+        : ["(unlabeled account)"];
+
+      labels.forEach((label) => {
+        const key = String(label || "").trim() || "(unlabeled account)";
+        next[key] = {
+          accountLabel: key,
+          lastRunAt: new Date().toISOString(),
+          status: status || "failed",
+          stage: stage || "unknown",
+          reason: reason || "",
+          unresolvedProfiles,
+          unresolvedItems,
+          totals: {
+            itemStacks: totals?.itemStacks || 0,
+            totalItemQuantity: totals?.totalItemQuantity || 0,
+            uniqueItems: totals?.uniqueItems || 0,
+            ownersWithItems: totals?.ownersWithItems || 0,
+            snapshotCharacters: totals?.snapshotCharacters || 0
+          },
+          warningsCount: Array.isArray(warnings) ? warnings.length : 0
+        };
+      });
+
+      setInventorySyncHistoryByAccount(next);
+      saveInventorySyncHistory(next);
+    };
 
     try {
+      syncStage = "parsing-sources";
       const parsedItems = [];
       const parsedInventoryProfiles = [];
       const parsedCharacterProfiles = [];
+      const characterIndexMapByAccount = new Map();
       const sourceWarnings = [];
+
+      const getAccountKey = (value) => normalize(value) || "__default__";
+      const getEntryAccountKey = (entry) => getAccountKey(entry?.accountHintName);
+      const getCharacterMapForEntry = (entry) => characterIndexMapByAccount.get(getEntryAccountKey(entry)) || null;
+      const indexKey = (entry) => {
+        if (!Number.isInteger(entry?.characterIndex)) {
+          return "";
+        }
+        return `${getEntryAccountKey(entry)}|${entry.characterIndex}`;
+      };
 
       for (const source of sources) {
         const sourceType = detectDataStoreSourceType(source.fileName, source.text);
         let parsedFromSourceCount = 0;
+
+        if (syncDiagnostics.sourceBreakdown[sourceType] === undefined) {
+          syncDiagnostics.sourceBreakdown.unknown += 1;
+        } else {
+          syncDiagnostics.sourceBreakdown[sourceType] += 1;
+        }
 
         if (sourceType === "containers") {
           const items = parseDataStoreContainers(source.text, source.fileName || "", source.accountHintName || "");
@@ -675,6 +998,26 @@ function SettingsPage() {
           parsedCharacterProfiles.push(...profiles);
           parsedFromSourceCount = profiles.length;
         }
+        if (sourceType === "core") {
+          const accountKey = getAccountKey(source.accountHintName);
+          if (!characterIndexMapByAccount.has(accountKey)) {
+            characterIndexMapByAccount.set(accountKey, new Map());
+          }
+          const accountIndexMap = characterIndexMapByAccount.get(accountKey);
+          const map = parseDataStoreCharacterIndexMap(source.text);
+          map.forEach((value, index) => {
+            if (!accountIndexMap.has(index)) {
+              accountIndexMap.set(index, value);
+            }
+          });
+          parsedFromSourceCount = map.size;
+        }
+
+        syncDiagnostics.files.push({
+          fileName: source.fileName || "",
+          sourceType,
+          parsedCount: parsedFromSourceCount
+        });
 
         sourceWarnings.push(
           ...validateDataStoreSourceHealth({
@@ -686,16 +1029,261 @@ function SettingsPage() {
         );
       }
 
-      if (parsedItems.length) {
-        await replaceInventoryItems(user.uid, parsedItems);
+      syncDiagnostics.characterIndexMapSize = [...characterIndexMapByAccount.values()]
+        .reduce((sum, map) => sum + map.size, 0);
+
+      const characterByIndex = new Map();
+      syncStage = "resolving-identities";
+      const resolvedCharacterProfilesRaw = parsedCharacterProfiles.map((profile) => {
+        const sourceCharacterMap = getCharacterMapForEntry(profile);
+        const key = indexKey(profile);
+        const mapped = Number.isInteger(profile.characterIndex)
+          ? sourceCharacterMap?.get(profile.characterIndex) || null
+          : null;
+        const fallback = Number.isInteger(profile.characterIndex)
+          ? characterByIndex.get(key)
+          : null;
+        const characterName = profile.characterName || mapped?.name || fallback?.characterName || "";
+        const realm = profile.realm || mapped?.realm || fallback?.realm || "";
+        const resolved = {
+          ...profile,
+          characterName,
+          realm
+        };
+
+        if (key && characterName) {
+          characterByIndex.set(key, {
+            characterName,
+            realm
+          });
+        }
+
+        return resolved;
+      });
+
+      const resolvedInventoryProfilesRaw = parsedInventoryProfiles.map((profile) => {
+        const sourceCharacterMap = getCharacterMapForEntry(profile);
+        const key = indexKey(profile);
+        const mapped = Number.isInteger(profile.characterIndex)
+          ? sourceCharacterMap?.get(profile.characterIndex) || null
+          : null;
+        const fallback = Number.isInteger(profile.characterIndex)
+          ? characterByIndex.get(key)
+          : null;
+        const characterName = profile.characterName || mapped?.name || fallback?.characterName || "";
+        const realm = profile.realm || mapped?.realm || fallback?.realm || "";
+        return {
+          ...profile,
+          characterName,
+          realm
+        };
+      });
+
+      const resolvedItemsRaw = parsedItems
+        .map((item) => {
+          const sourceCharacterMap = getCharacterMapForEntry(item);
+          const key = indexKey(item);
+          const mapped = Number.isInteger(item.characterIndex)
+            ? sourceCharacterMap?.get(item.characterIndex) || null
+            : null;
+          const fallback = Number.isInteger(item.characterIndex)
+            ? characterByIndex.get(key)
+            : null;
+          const characterName = item.characterName || mapped?.name || fallback?.characterName || "";
+          const realm = item.realm || mapped?.realm || fallback?.realm || "";
+          return {
+            ...item,
+            characterName,
+            realm
+          };
+        });
+
+      const resolvedCharacterProfiles = resolvedCharacterProfilesRaw;
+      const resolvedInventoryProfiles = resolvedInventoryProfilesRaw;
+      const resolvedItems = resolvedItemsRaw
+        .filter((item) => item.characterName && item.realm);
+
+      const requiresCoreMap = parsedItems.concat(parsedInventoryProfiles, parsedCharacterProfiles).some(
+        (entry) => Number.isInteger(entry.characterIndex)
+      );
+      syncDiagnostics.requiresCoreMap = requiresCoreMap;
+
+      const indexedAccounts = new Set(
+        parsedItems
+          .concat(parsedInventoryProfiles, parsedCharacterProfiles)
+          .filter((entry) => Number.isInteger(entry.characterIndex))
+          .map((entry) => getEntryAccountKey(entry))
+      );
+      const missingCoreAccounts = [...indexedAccounts].filter(
+        (accountKey) => !(characterIndexMapByAccount.get(accountKey)?.size)
+      );
+      integrityReport.indexedAccountLabels = Array.from(
+        new Set(
+          parsedItems
+            .concat(parsedInventoryProfiles, parsedCharacterProfiles)
+            .filter((entry) => Number.isInteger(entry.characterIndex))
+            .map((entry) => String(entry.accountHintName || "").trim() || "(unlabeled account)")
+        )
+      ).sort((a, b) => a.localeCompare(b));
+
+      const unresolvedProfileRecords = [...resolvedInventoryProfiles, ...resolvedCharacterProfiles]
+        .filter((profile) => !profile.characterName || !profile.realm);
+      const unresolvedItemRecords = resolvedItemsRaw.filter((item) => !item.characterName || !item.realm);
+      syncDiagnostics.unresolvedProfiles = unresolvedProfileRecords.length;
+      syncDiagnostics.unresolvedItems = unresolvedItemRecords.length;
+      integrityReport.unresolvedProfiles = unresolvedProfileRecords.length;
+      integrityReport.unresolvedItems = unresolvedItemRecords.length;
+      syncDiagnostics.unresolvedProfileSample = unresolvedProfileRecords[0]
+        ? JSON.stringify({
+          sourceType: unresolvedProfileRecords[0].sourceType || "unknown",
+          characterIndex: unresolvedProfileRecords[0].characterIndex,
+          characterName: unresolvedProfileRecords[0].characterName || "",
+          realm: unresolvedProfileRecords[0].realm || ""
+        })
+        : "";
+      syncDiagnostics.unresolvedItemSample = unresolvedItemRecords[0]
+        ? JSON.stringify({
+          sourceType: unresolvedItemRecords[0].sourceType || "unknown",
+          characterIndex: unresolvedItemRecords[0].characterIndex,
+          itemId: unresolvedItemRecords[0].itemId || "",
+          characterName: unresolvedItemRecords[0].characterName || "",
+          realm: unresolvedItemRecords[0].realm || ""
+        })
+        : "";
+
+      if (requiresCoreMap && missingCoreAccounts.length) {
+        const missingAccountLabels = Array.from(
+          new Set(
+            parsedItems
+              .concat(parsedInventoryProfiles, parsedCharacterProfiles)
+              .filter((entry) => Number.isInteger(entry.characterIndex) && missingCoreAccounts.includes(getEntryAccountKey(entry)))
+              .map((entry) => String(entry.accountHintName || "").trim() || "(unlabeled account)")
+          )
+        );
+        integrityReport.status = "failed";
+        integrityReport.stage = syncStage;
+        integrityReport.reason = `Missing DataStore.lua for account(s): ${missingAccountLabels.join(", ")}`;
+        integrityReport.warnings = [...sourceWarnings];
+        setBagnonIntegrityReport(integrityReport);
+        updateInventorySyncHistory({
+          accountLabels: missingAccountLabels,
+          status: integrityReport.status,
+          stage: integrityReport.stage,
+          reason: integrityReport.reason,
+          unresolvedProfiles: integrityReport.unresolvedProfiles,
+          unresolvedItems: integrityReport.unresolvedItems,
+          totals: integrityReport.totals,
+          warnings: integrityReport.warnings
+        });
+        throw new Error(
+          `Sync blocked: DataStore.lua is required for deterministic character mapping for account(s): ${missingAccountLabels.join(", ")}. Connect DataStore.lua from the same SavedVariables folder for each listed account and sync again.`
+        );
+      }
+
+      const unresolvedProfilesCount = resolvedInventoryProfiles.filter(
+        (profile) => !profile.characterName || !profile.realm
+      ).length + resolvedCharacterProfiles.filter(
+        (profile) => !profile.characterName || !profile.realm
+      ).length;
+      if (unresolvedProfilesCount > 0) {
+        integrityReport.status = "failed";
+        integrityReport.stage = syncStage;
+        integrityReport.reason = `${unresolvedProfilesCount} profile record(s) could not be mapped to character+realm.`;
+        integrityReport.warnings = [...sourceWarnings];
+        setBagnonIntegrityReport(integrityReport);
+        updateInventorySyncHistory({
+          accountLabels: integrityReport.indexedAccountLabels,
+          status: integrityReport.status,
+          stage: integrityReport.stage,
+          reason: integrityReport.reason,
+          unresolvedProfiles: integrityReport.unresolvedProfiles,
+          unresolvedItems: integrityReport.unresolvedItems,
+          totals: integrityReport.totals,
+          warnings: integrityReport.warnings
+        });
+        throw new Error(
+          `Sync blocked: ${unresolvedProfilesCount} profile record(s) could not be mapped to character+realm. Ensure DataStore.lua, DataStore_Characters.lua, and DataStore_Inventory.lua come from the same account snapshot.`
+        );
+      }
+
+      syncStage = "merging-profiles";
+      const mergedInventoryProfiles = mergeInventoryProfiles(
+        resolvedInventoryProfiles.filter((profile) => profile.characterName && profile.realm)
+      );
+      const mergedCharacterProfiles = mergeCharacterProfiles(
+        resolvedCharacterProfiles.filter((profile) => profile.characterName && profile.realm)
+      );
+
+      const accountByNormalizedName = new Map(
+        data.accounts.map((account) => [normalize(account.battleNetId), account])
+      );
+      const resolveAccountId = async (accountHintName) => {
+        const normalized = normalize(accountHintName);
+        if (!normalized) {
+          return "";
+        }
+
+        const existing = accountByNormalizedName.get(normalized);
+        if (existing?.id) {
+          return existing.id;
+        }
+
+        const created = await addAccount(user.uid, accountHintName.trim());
+        const createdAccount = { id: created.id, battleNetId: accountHintName.trim() };
+        accountByNormalizedName.set(normalized, createdAccount);
+        return created.id;
+      };
+
+      syncStage = "resolving-accounts";
+      for (const profile of mergedCharacterProfiles) {
+        if (!profile.accountId && profile.accountHintName) {
+          profile.accountId = await resolveAccountId(profile.accountHintName);
+        }
+      }
+      for (const profile of mergedInventoryProfiles) {
+        if (!profile.accountId && profile.accountHintName) {
+          profile.accountId = await resolveAccountId(profile.accountHintName);
+        }
       }
 
       const charactersByKey = new Map(
         data.characters.map((character) => [characterProfileKey(character.name, character.realm), character])
       );
+      const createOrGetCharacter = async (profile) => {
+        const key = characterProfileKey(profile.characterName, profile.realm);
+        const existing = charactersByKey.get(key);
+        if (existing) {
+          return existing;
+        }
 
-      const mergedInventoryProfiles = mergeInventoryProfiles(parsedInventoryProfiles);
-      const mergedCharacterProfiles = mergeCharacterProfiles(parsedCharacterProfiles);
+        const payload = {
+          name: profile.characterName,
+          class: profile.className || "Unknown",
+          faction: profile.faction || "Unknown",
+          realm: profile.realm,
+          accountId: profile.accountId || "",
+          level: typeof profile.level === "number" ? profile.level : null,
+          restedXp: typeof profile.restXp === "number" ? profile.restXp : 0,
+          avatarUrl: "",
+          showOnDashboard: true,
+          activeRaidTag: "",
+          importedFromDataStore: true
+        };
+
+        const created = await addCharacter(user.uid, payload);
+        const createdCharacter = { id: created.id, ...payload };
+        charactersByKey.set(key, createdCharacter);
+        return createdCharacter;
+      };
+
+      syncStage = "ensuring-characters";
+      for (const profile of mergedCharacterProfiles) {
+        await createOrGetCharacter(profile);
+      }
+      for (const profile of mergedInventoryProfiles) {
+        await createOrGetCharacter(profile);
+      }
+
       const profileOps = [];
 
       mergedInventoryProfiles.forEach((profile) => {
@@ -744,31 +1332,174 @@ function SettingsPage() {
       });
 
       if (profileOps.length) {
+        syncStage = "writing-profiles";
         await Promise.all(profileOps);
       }
 
-      const uniqueItems = new Set(parsedItems.map((item) => `${item.itemId || ""}|${normalize(item.itemName)}`));
+      syncStage = "finalizing";
+      const uniqueItems = new Set(resolvedItems.map((item) => `${item.itemId || ""}|${normalize(item.itemName)}`));
+      const totalItemQuantity = resolvedItems.reduce((sum, item) => sum + (Number(item.count) || 0), 0);
+      const ownersWithItems = new Set(
+        resolvedItems.map((item) => `${normalize(item.characterName)}|${normalize(item.realm)}`)
+      ).size;
+      const importedCharacterMap = new Map();
+      resolvedItems.forEach((item) => {
+        if (!item.characterName || !item.realm) {
+          return;
+        }
+        const key = characterLooseKey(item.characterName, item.realm);
+        if (!importedCharacterMap.has(key)) {
+          importedCharacterMap.set(key, `${item.characterName} (${item.realm})`);
+        }
+      });
+      mergedCharacterProfiles.forEach((profile) => {
+        if (!profile.characterName || !profile.realm) {
+          return;
+        }
+        const key = characterLooseKey(profile.characterName, profile.realm);
+        if (!importedCharacterMap.has(key)) {
+          importedCharacterMap.set(key, `${profile.characterName} (${profile.realm})`);
+        }
+      });
+
+      const importedCharacterLabels = [...importedCharacterMap.values()].sort((a, b) => a.localeCompare(b));
+      const snapshotCharacterCount = importedCharacterLabels.length;
+      const missingKnownCharacters = data.characters
+        .filter((character) => !importedCharacterMap.has(characterLooseKey(character.name, character.realm)))
+        .map((character) => `${character.name} (${character.realm})`)
+        .sort((a, b) => a.localeCompare(b));
+      const importedPreview = importedCharacterLabels.slice(0, 12).join(", ");
+      const missingPreview = missingKnownCharacters.slice(0, 12).join(", ");
+
+      const accountBreakdownMap = new Map();
+      const ensureAccountStats = (accountLabel) => {
+        if (!accountBreakdownMap.has(accountLabel)) {
+          accountBreakdownMap.set(accountLabel, {
+            owners: new Set(),
+            snapshotCharacters: new Set()
+          });
+        }
+        return accountBreakdownMap.get(accountLabel);
+      };
+      const resolveAccountLabel = (value) => String(value || "").trim() || "(unlabeled account)";
+
+      resolvedItems.forEach((item) => {
+        const accountLabel = resolveAccountLabel(item.accountHintName);
+        const stats = ensureAccountStats(accountLabel);
+        stats.owners.add(characterLooseKey(item.characterName, item.realm));
+        stats.snapshotCharacters.add(characterLooseKey(item.characterName, item.realm));
+      });
+
+      mergedCharacterProfiles.forEach((profile) => {
+        const accountLabel = resolveAccountLabel(profile.accountHintName);
+        const stats = ensureAccountStats(accountLabel);
+        stats.snapshotCharacters.add(characterLooseKey(profile.characterName, profile.realm));
+      });
+
+      const accountBreakdown = [...accountBreakdownMap.entries()]
+        .map(([accountName, stats]) => ({
+          accountName,
+          ownersWithItems: stats.owners.size,
+          snapshotCharacters: stats.snapshotCharacters.size
+        }))
+        .sort((a, b) => a.accountName.localeCompare(b.accountName));
+      const accountBreakdownText = accountBreakdown
+        .map((entry) => `${entry.accountName}: ${entry.ownersWithItems} owners / ${entry.snapshotCharacters} snapshot`)
+        .join(" | ");
+
+      syncStage = "writing-inventory-items";
+      await replaceInventoryItems(user.uid, resolvedItems, {
+        ownersWithItems,
+        snapshotCharacterCount,
+        equipmentProfileCount: mergedInventoryProfiles.length,
+        characterProfileCount: mergedCharacterProfiles.length,
+        uniqueItemCount: uniqueItems.size,
+        totalItemQuantity,
+        accountBreakdown
+      });
+
+      integrityReport.status = "passed";
+      integrityReport.stage = syncStage;
+      integrityReport.reason = "All deterministic mapping checks passed.";
+      integrityReport.totals = {
+        itemStacks: resolvedItems.length,
+        totalItemQuantity,
+        uniqueItems: uniqueItems.size,
+        ownersWithItems,
+        snapshotCharacters: snapshotCharacterCount,
+        equipmentProfiles: mergedInventoryProfiles.length,
+        characterProfiles: mergedCharacterProfiles.length
+      };
+      integrityReport.accountBreakdown = accountBreakdown;
+      integrityReport.warnings = [...sourceWarnings];
+      setBagnonIntegrityReport(integrityReport);
+      updateInventorySyncHistory({
+        accountLabels: accountBreakdown.map((entry) => entry.accountName),
+        status: integrityReport.status,
+        stage: integrityReport.stage,
+        reason: integrityReport.reason,
+        unresolvedProfiles: integrityReport.unresolvedProfiles,
+        unresolvedItems: integrityReport.unresolvedItems,
+        totals: integrityReport.totals,
+        warnings: integrityReport.warnings
+      });
+
       const warningSummary = formatImportWarnings(sourceWarnings);
       setBagnonSyncMessage(
-        `Sync complete. Imported ${parsedItems.length} item stacks across ${uniqueItems.size} unique item(s), ${mergedInventoryProfiles.length} equipment profile(s), and ${mergedCharacterProfiles.length} character profile snapshot(s).${warningSummary ? ` Validation warnings: ${warningSummary}.` : ""}`
+        `Sync complete. Imported ${resolvedItems.length} item stacks (${totalItemQuantity} total item count) across ${uniqueItems.size} unique item(s). Owners with items: ${ownersWithItems}. Snapshot characters: ${snapshotCharacterCount}. Equipment profile(s): ${mergedInventoryProfiles.length}. Character profile snapshot(s): ${mergedCharacterProfiles.length}.${accountBreakdownText ? ` Per-account: ${accountBreakdownText}.` : ""} Snapshot characters (${importedCharacterLabels.length}): ${importedPreview}${importedCharacterLabels.length > 12 ? ", ..." : ""}.${missingKnownCharacters.length ? ` Nova characters not present in this inventory snapshot (${missingKnownCharacters.length}): ${missingPreview}${missingKnownCharacters.length > 12 ? ", ..." : ""}.` : ""}${warningSummary ? ` Validation warnings: ${warningSummary}.` : ""}`
       );
     } catch (error) {
-      setBagnonSyncMessage("Sync failed. Ensure you selected valid DataStore_Containers.lua, DataStore_Inventory.lua, and DataStore_Characters.lua files.");
+      const diagnosticSummary = formatInventoryDiagnostics({
+        ...syncDiagnostics,
+        stage: syncStage
+      });
+      if (integrityReport.status === "in-progress") {
+        integrityReport.status = "failed";
+        integrityReport.stage = syncStage;
+        integrityReport.reason = error?.message || "Sync failed.";
+        integrityReport.warnings = [];
+        integrityReport.unresolvedProfiles = syncDiagnostics.unresolvedProfiles;
+        integrityReport.unresolvedItems = syncDiagnostics.unresolvedItems;
+        setBagnonIntegrityReport(integrityReport);
+        updateInventorySyncHistory({
+          accountLabels: integrityReport.indexedAccountLabels,
+          status: integrityReport.status,
+          stage: integrityReport.stage,
+          reason: integrityReport.reason,
+          unresolvedProfiles: integrityReport.unresolvedProfiles,
+          unresolvedItems: integrityReport.unresolvedItems,
+          totals: integrityReport.totals,
+          warnings: integrityReport.warnings
+        });
+      }
+      setBagnonSyncMessage(
+        `${error?.message || "Sync failed."} Diagnostics: ${diagnosticSummary || "none"}.`
+      );
     } finally {
       setIsBagnonSyncing(false);
     }
   };
 
-  const loadSelectedNovaSources = async () => {
+  const loadSelectedNovaSources = async (allowedAccountLabels = []) => {
     const handles = await loadConnectedHandles();
     const selectedIndexes = readSelectedFileIndexes();
     const meta = readConnectedFileMeta();
-    const selectedHandles = selectedIndexes.length
-      ? selectedIndexes.map((index) => handles[index]).filter(Boolean)
-      : handles;
+    const selectedHandleEntries = selectedIndexes.length
+      ? selectedIndexes
+        .map((index) => ({ handle: handles[index], sourceIndex: index }))
+        .filter((entry) => Boolean(entry.handle))
+      : handles.map((handle, sourceIndex) => ({ handle, sourceIndex }));
+    const allowedAccounts = new Set((allowedAccountLabels || []).map((label) => normalize(label)));
 
     const sources = [];
-    for (const [index, handle] of selectedHandles.entries()) {
+    for (const entry of selectedHandleEntries) {
+      const handle = entry.handle;
+      const accountHintName = String(meta[entry.sourceIndex]?.accountName || "").trim();
+      const accountLabel = accountHintName || "(unlabeled account)";
+      if (allowedAccounts.size && !allowedAccounts.has(normalize(accountLabel))) {
+        continue;
+      }
+
       let permission = "granted";
       if (handle.queryPermission) {
         permission = await handle.queryPermission({ mode: "read" });
@@ -784,23 +1515,33 @@ function SettingsPage() {
       sources.push({
         text: await file.text(),
         fileName: file.name,
-        accountHintName: selectedIndexes.length ? meta[selectedIndexes[index]]?.accountName || "" : meta[index]?.accountName || ""
+        accountHintName
       });
     }
 
     return sources;
   };
 
-  const loadSelectedBagnonSources = async () => {
+  const loadSelectedBagnonSources = async (allowedAccountLabels = []) => {
     const handles = await loadBagnonConnectedHandles();
     const selectedIndexes = readBagnonSelectedFileIndexes();
     const meta = readBagnonConnectedFileMeta();
-    const selectedHandles = selectedIndexes.length
-      ? selectedIndexes.map((index) => handles[index]).filter(Boolean)
-      : handles;
+    const selectedHandleEntries = selectedIndexes.length
+      ? selectedIndexes
+        .map((index) => ({ handle: handles[index], sourceIndex: index }))
+        .filter((entry) => Boolean(entry.handle))
+      : handles.map((handle, sourceIndex) => ({ handle, sourceIndex }));
+    const allowedAccounts = new Set((allowedAccountLabels || []).map((label) => normalize(label)));
 
     const sources = [];
-    for (const [index, handle] of selectedHandles.entries()) {
+    for (const entry of selectedHandleEntries) {
+      const handle = entry.handle;
+      const accountHintName = String(meta[entry.sourceIndex]?.accountName || "").trim();
+      const accountLabel = accountHintName || "(unlabeled account)";
+      if (allowedAccounts.size && !allowedAccounts.has(normalize(accountLabel))) {
+        continue;
+      }
+
       let permission = "granted";
       if (handle.queryPermission) {
         permission = await handle.queryPermission({ mode: "read" });
@@ -815,7 +1556,7 @@ function SettingsPage() {
       const file = await handle.getFile();
       sources.push({
         text: await file.text(),
-        accountHintName: selectedIndexes.length ? meta[selectedIndexes[index]]?.accountName || "" : meta[index]?.accountName || "",
+        accountHintName,
         fileName: file.name
       });
     }
@@ -846,9 +1587,14 @@ function SettingsPage() {
         return;
       }
 
+      const defaultAccountLabel = getDefaultAccountLabel(data.accounts, user?.email);
       setPendingBagnonConnectHandles(handles);
-      setPendingBagnonAccountName("");
-      setBagnonSyncMessage("Select an account for the new files, then confirm.");
+      setPendingBagnonAccountName(
+        getUniqueAccountHint(bagnonPaths)
+        || getUniqueAccountHint(bagnonConnectedFiles.map((item) => item.accountName))
+        || defaultAccountLabel
+      );
+      setBagnonSyncMessage("Select or type an account for the new files, then confirm.");
     } catch {
       // User cancelled picker.
     }
@@ -865,7 +1611,8 @@ function SettingsPage() {
     }
 
     try {
-      const accountHintName = pendingBagnonAccountName.trim();
+      const defaultAccountLabel = getDefaultAccountLabel(data.accounts, user?.email);
+      const accountHintName = pendingBagnonAccountName.trim() || defaultAccountLabel;
       const existingHandles = await loadBagnonConnectedHandles();
       const existingMeta = readBagnonConnectedFileMeta();
 
@@ -954,6 +1701,59 @@ function SettingsPage() {
     });
   };
 
+  const onChangeBagnonConnectedFileAccountName = async (id, accountName) => {
+    const next = bagnonConnectedFiles.map((item) => (
+      item.id === id
+        ? { ...item, accountName }
+        : item
+    ));
+
+    setBagnonConnectedFiles(next);
+    try {
+      await saveBagnonConnectedHandles(next.map((item) => item.handle));
+      saveBagnonConnectedFileMeta(
+        next.map((item) => ({
+          accountName: String(item.accountName || "").trim(),
+          fileName: item.fileName || item.name || ""
+        }))
+      );
+    } catch {
+      setBagnonSyncMessage("Could not update account label for the connected inventory file.");
+    }
+  };
+
+  const onApplyBulkBagnonAccountName = async () => {
+    const value = bulkBagnonAccountName.trim();
+    if (!value) {
+      setBagnonSyncMessage("Type an account label to apply to selected inventory files.");
+      return;
+    }
+
+    const selectedCount = bagnonConnectedFiles.filter((item) => item.selected).length;
+    if (!selectedCount) {
+      setBagnonSyncMessage("Select at least one inventory file to apply bulk account label.");
+      return;
+    }
+
+    const next = bagnonConnectedFiles.map((item) => (
+      item.selected ? { ...item, accountName: value } : item
+    ));
+    setBagnonConnectedFiles(next);
+
+    try {
+      await saveBagnonConnectedHandles(next.map((item) => item.handle));
+      saveBagnonConnectedFileMeta(
+        next.map((item) => ({
+          accountName: String(item.accountName || "").trim(),
+          fileName: item.fileName || item.name || ""
+        }))
+      );
+      setBagnonSyncMessage(`Applied account label \"${value}\" to ${selectedCount} selected inventory file(s).`);
+    } catch {
+      setBagnonSyncMessage("Could not apply bulk account label to selected inventory files.");
+    }
+  };
+
   const onClearBagnonInventory = async () => {
     if (!window.confirm("Clear synced inventory data for your account? You can re-sync at any time.")) {
       return;
@@ -1027,13 +1827,13 @@ function SettingsPage() {
   const onUpdateFromConnectedFiles = async (silent = false) => {
     try {
       const [novaSources, bagnonSources] = await Promise.all([
-        loadSelectedNovaSources(),
-        loadSelectedBagnonSources()
+        loadSelectedNovaSources(selectedNovaSyncAccounts),
+        loadSelectedBagnonSources(selectedInventorySyncAccounts)
       ]);
 
       if (!novaSources.length && !bagnonSources.length) {
         if (!silent) {
-          setSyncMessage("Select at least one connected file to sync.");
+          setSyncMessage("No connected files matched your selected sync-account filters.");
         }
         return;
       }
@@ -1043,6 +1843,91 @@ function SettingsPage() {
       }
 
       if (bagnonSources.length) {
+        const missingInventorySources = getMissingExpectedFilesFromSources(
+          bagnonSources,
+          INVENTORY_EXPECTED_FILES
+        );
+        const missingInventorySourcesByAccount = getMissingExpectedFilesByAccountFromSources(
+          bagnonSources,
+          INVENTORY_EXPECTED_FILES
+        );
+        if (missingInventorySources.length || missingInventorySourcesByAccount.length) {
+          const selectedInventoryFiles = bagnonSources
+            .map((source) => source.fileName)
+            .filter(Boolean)
+            .join(", ");
+          const missingByAccountSummary = missingInventorySourcesByAccount
+            .map((entry) => `${entry.accountLabel}: ${entry.missing.join(", ")}`)
+            .join(" | ");
+          const missingReason = missingInventorySourcesByAccount.length
+            ? `Missing required selected inventory file(s) by account: ${missingByAccountSummary}`
+            : `Missing required selected inventory file(s): ${missingInventorySources.join(", ")}`;
+          setBagnonIntegrityReport({
+            status: "failed",
+            stage: "pre-parse-validation",
+            reason: missingReason,
+            totals: {
+              itemStacks: 0,
+              totalItemQuantity: 0,
+              uniqueItems: 0,
+              ownersWithItems: 0,
+              snapshotCharacters: 0,
+              equipmentProfiles: 0,
+              characterProfiles: 0
+            },
+            sourceBreakdown: {
+              containers: 0,
+              inventory: 0,
+              characters: 0,
+              core: 0,
+              unknown: 0
+            },
+            files: bagnonSources.map((source) => ({
+              fileName: source.fileName || "",
+              sourceType: detectDataStoreSourceType(source.fileName || "", source.text || ""),
+              parsedCount: 0
+            })),
+            unresolvedProfiles: 0,
+            unresolvedItems: 0,
+            indexedAccountLabels: Array.from(new Set(bagnonSources.map((source) => source.accountHintName || "(unlabeled account)"))),
+            accountBreakdown: [],
+            warnings: missingInventorySourcesByAccount.length
+              ? missingInventorySourcesByAccount.map((entry) => `Missing by account ${entry.accountLabel}: ${entry.missing.join(", ")}`)
+              : []
+          });
+          const previousHistory = readInventorySyncHistory();
+          const nextHistory = {
+            ...previousHistory
+          };
+          const accountsForHistory = missingInventorySourcesByAccount.length
+            ? missingInventorySourcesByAccount.map((entry) => entry.accountLabel)
+            : Array.from(new Set(bagnonSources.map((source) => String(source.accountHintName || "").trim() || "(unlabeled account)")));
+          accountsForHistory.forEach((accountLabel) => {
+            nextHistory[accountLabel] = {
+              accountLabel,
+              lastRunAt: new Date().toISOString(),
+              status: "failed",
+              stage: "pre-parse-validation",
+              reason: missingReason,
+              unresolvedProfiles: 0,
+              unresolvedItems: 0,
+              totals: {
+                itemStacks: 0,
+                totalItemQuantity: 0,
+                uniqueItems: 0,
+                ownersWithItems: 0,
+                snapshotCharacters: 0
+              },
+              warningsCount: missingInventorySourcesByAccount.length
+            };
+          });
+          setInventorySyncHistoryByAccount(nextHistory);
+          saveInventorySyncHistory(nextHistory);
+          setBagnonSyncMessage(
+            `Sync blocked before parse. ${missingReason}. Selected now: ${selectedInventoryFiles || "none"}. If a file is connected but unchecked, tick it under Connected Inventory Files.`
+          );
+          return;
+        }
         await syncBagnonFromLuaTexts(bagnonSources);
       }
     } catch {
@@ -1060,6 +1945,77 @@ function SettingsPage() {
         .filter((value) => value >= 0);
       saveSelectedFileIndexes(selectedIndexes);
       return next;
+    });
+  };
+
+  const onChangeConnectedFileAccountName = async (id, accountName) => {
+    const next = connectedFiles.map((item) => (
+      item.id === id
+        ? { ...item, accountName }
+        : item
+    ));
+
+    setConnectedFiles(next);
+    try {
+      await saveConnectedHandles(next.map((item) => item.handle));
+      saveConnectedFileMeta(
+        next.map((item) => ({
+          accountName: String(item.accountName || "").trim(),
+          fileName: item.fileName || item.name || ""
+        }))
+      );
+    } catch {
+      setSyncMessage("Could not update account label for the connected Nova file.");
+    }
+  };
+
+  const onApplyBulkNovaAccountName = async () => {
+    const value = bulkNovaAccountName.trim();
+    if (!value) {
+      setSyncMessage("Type an account label to apply to selected Nova files.");
+      return;
+    }
+
+    const selectedCount = connectedFiles.filter((item) => item.selected).length;
+    if (!selectedCount) {
+      setSyncMessage("Select at least one Nova file to apply bulk account label.");
+      return;
+    }
+
+    const next = connectedFiles.map((item) => (
+      item.selected ? { ...item, accountName: value } : item
+    ));
+    setConnectedFiles(next);
+
+    try {
+      await saveConnectedHandles(next.map((item) => item.handle));
+      saveConnectedFileMeta(
+        next.map((item) => ({
+          accountName: String(item.accountName || "").trim(),
+          fileName: item.fileName || item.name || ""
+        }))
+      );
+      setSyncMessage(`Applied account label \"${value}\" to ${selectedCount} selected Nova file(s).`);
+    } catch {
+      setSyncMessage("Could not apply bulk account label to selected Nova files.");
+    }
+  };
+
+  const onToggleNovaSyncAccount = (accountLabel, checked) => {
+    setSelectedNovaSyncAccounts((prev) => {
+      if (checked) {
+        return prev.includes(accountLabel) ? prev : [...prev, accountLabel];
+      }
+      return prev.filter((value) => value !== accountLabel);
+    });
+  };
+
+  const onToggleInventorySyncAccount = (accountLabel, checked) => {
+    setSelectedInventorySyncAccounts((prev) => {
+      if (checked) {
+        return prev.includes(accountLabel) ? prev : [...prev, accountLabel];
+      }
+      return prev.filter((value) => value !== accountLabel);
     });
   };
 
@@ -1114,12 +2070,16 @@ function SettingsPage() {
       await clearInventoryData(user.uid);
       localStorage.removeItem(NIT_PATHS_KEY);
       localStorage.removeItem(BAGNON_PATHS_KEY);
+      localStorage.removeItem(NOVA_SYNC_ACCOUNT_FILTERS_KEY);
+      localStorage.removeItem(INVENTORY_SYNC_ACCOUNT_FILTERS_KEY);
       await saveConnectedHandles([]);
       await saveBagnonConnectedHandles([]);
       setNitPaths([]);
       setBagnonPaths([]);
       setConnectedFiles([]);
       setBagnonConnectedFiles([]);
+      setSelectedNovaSyncAccounts([]);
+      setSelectedInventorySyncAccounts([]);
       saveSelectedFileIndexes([]);
       saveBagnonSelectedFileIndexes([]);
       setSyncMessage("All data deleted.");
@@ -1128,6 +2088,19 @@ function SettingsPage() {
     } finally {
       setIsDeletingAll(false);
     }
+  };
+
+  const onDownloadBagnonIntegrityReport = () => {
+    if (!bagnonIntegrityReport) {
+      return;
+    }
+
+    const exportPayload = {
+      generatedAt: new Date().toISOString(),
+      selectedInventorySyncAccounts,
+      report: bagnonIntegrityReport
+    };
+    downloadJsonFile("inventory-integrity-report.json", exportPayload);
   };
 
   return (
@@ -1213,7 +2186,40 @@ function SettingsPage() {
                 {isSyncing ? "Syncing..." : "Sync Connected Files"}
               </button>
             </div>
+            <h4>Sync Accounts (Optional Filter)</h4>
+            <p className="subtitle">If none are checked, all selected Nova files are synced.</p>
+            {novaAccountOptions.length ? (
+              <div className="row-actions">
+                {novaAccountOptions.map((accountLabel) => (
+                  <label key={accountLabel} className="saved-toggle">
+                    <input
+                      type="checkbox"
+                      checked={selectedNovaSyncAccounts.includes(accountLabel)}
+                      onChange={(event) => onToggleNovaSyncAccount(accountLabel, event.target.checked)}
+                    />
+                    {accountLabel}
+                  </label>
+                ))}
+                <button type="button" className="secondary-btn" onClick={() => setSelectedNovaSyncAccounts([])}>
+                  Clear Filter
+                </button>
+              </div>
+            ) : (
+              <p className="subtitle">No Nova account labels available yet.</p>
+            )}
             <h4>Connected Nova Files</h4>
+            <p className="subtitle">Each connected file can have its own account label.</p>
+            <div className="row-actions">
+              <input
+                list="account-options"
+                value={bulkNovaAccountName}
+                onChange={(event) => setBulkNovaAccountName(event.target.value)}
+                placeholder="Bulk account label for selected Nova files"
+              />
+              <button type="button" className="secondary-btn" onClick={onApplyBulkNovaAccountName}>
+                Apply To Selected
+              </button>
+            </div>
             <ul className="simple-list">
               {connectedFiles.length ? (
                 connectedFiles.map((item) => (
@@ -1226,6 +2232,11 @@ function SettingsPage() {
                       />
                       {item.name}{item.accountName ? ` (${item.accountName})` : ""}
                     </label>
+                    <input
+                      value={item.accountName || ""}
+                      onChange={(event) => onChangeConnectedFileAccountName(item.id, event.target.value)}
+                      placeholder="Account label"
+                    />
                     <div className="row-actions">
                       <button type="button" className="secondary-btn" onClick={() => onReconnectConnectedFile(connectedFiles.findIndex((entry) => entry.id === item.id))}>
                         Reconnect
@@ -1252,17 +2263,17 @@ function SettingsPage() {
                 <p className="subtitle">
                   {pendingConnectHandles.length} selected file(s) awaiting confirmation.
                 </p>
-                <select
+                <input
+                  list="account-options"
                   value={pendingAccountName}
                   onChange={(event) => setPendingAccountName(event.target.value)}
-                >
-                  <option value="">No account</option>
+                  placeholder="Type or select account"
+                />
+                <datalist id="account-options">
                   {data.accounts.map((account) => (
-                    <option key={account.id} value={account.battleNetId}>
-                      {account.battleNetId}
-                    </option>
+                    <option key={account.id} value={account.battleNetId} />
                   ))}
-                </select>
+                </datalist>
                 <div className="row-actions">
                   <button type="button" onClick={onConfirmPendingConnect}>
                     Confirm Connection
@@ -1291,7 +2302,40 @@ function SettingsPage() {
                 {isClearingInventory ? "Clearing..." : "Clear Inventory Data"}
               </button>
             </div>
+            <h4>Sync Accounts (Optional Filter)</h4>
+            <p className="subtitle">If none are checked, all selected inventory files are synced.</p>
+            {inventoryAccountOptions.length ? (
+              <div className="row-actions">
+                {inventoryAccountOptions.map((accountLabel) => (
+                  <label key={accountLabel} className="saved-toggle">
+                    <input
+                      type="checkbox"
+                      checked={selectedInventorySyncAccounts.includes(accountLabel)}
+                      onChange={(event) => onToggleInventorySyncAccount(accountLabel, event.target.checked)}
+                    />
+                    {accountLabel}
+                  </label>
+                ))}
+                <button type="button" className="secondary-btn" onClick={() => setSelectedInventorySyncAccounts([])}>
+                  Clear Filter
+                </button>
+              </div>
+            ) : (
+              <p className="subtitle">No inventory account labels available yet.</p>
+            )}
             <h4>Connected Inventory Files</h4>
+            <p className="subtitle">Each connected file can have its own account label.</p>
+            <div className="row-actions">
+              <input
+                list="account-options-bagnon"
+                value={bulkBagnonAccountName}
+                onChange={(event) => setBulkBagnonAccountName(event.target.value)}
+                placeholder="Bulk account label for selected inventory files"
+              />
+              <button type="button" className="secondary-btn" onClick={onApplyBulkBagnonAccountName}>
+                Apply To Selected
+              </button>
+            </div>
             <ul className="simple-list">
               {bagnonConnectedFiles.length ? (
                 bagnonConnectedFiles.map((item) => (
@@ -1304,6 +2348,11 @@ function SettingsPage() {
                       />
                       {item.name}{item.accountName ? ` (${item.accountName})` : ""}
                     </label>
+                    <input
+                      value={item.accountName || ""}
+                      onChange={(event) => onChangeBagnonConnectedFileAccountName(item.id, event.target.value)}
+                      placeholder="Account label"
+                    />
                     <div className="row-actions">
                       <button
                         type="button"
@@ -1327,6 +2376,67 @@ function SettingsPage() {
               )}
             </ul>
             {bagnonSyncMessage ? <p>{bagnonSyncMessage}</p> : null}
+            {Object.keys(inventorySyncHistoryByAccount || {}).length ? (
+              <div className="panel">
+                <h4>Per-Account Sync History</h4>
+                <ul className="simple-list">
+                  {Object.values(inventorySyncHistoryByAccount)
+                    .sort((a, b) => String(a.accountLabel || "").localeCompare(String(b.accountLabel || "")))
+                    .map((entry) => (
+                      <li key={entry.accountLabel}>
+                        <strong>{entry.accountLabel}</strong>: {entry.status} at {entry.stage} on {entry.lastRunAt || "unknown"}.
+                        {entry.reason ? ` Reason: ${entry.reason}.` : ""}
+                        Totals: stacks {entry.totals?.itemStacks || 0}, count {entry.totals?.totalItemQuantity || 0}, unique {entry.totals?.uniqueItems || 0}.
+                        Unresolved: profiles {entry.unresolvedProfiles || 0}, items {entry.unresolvedItems || 0}. Warnings: {entry.warningsCount || 0}.
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            ) : null}
+            {bagnonIntegrityReport ? (
+              <div className="panel">
+                <h4>Inventory Integrity Report</h4>
+                <div className="row-actions">
+                  <button type="button" className="secondary-btn" onClick={onDownloadBagnonIntegrityReport}>
+                    Download Report JSON
+                  </button>
+                </div>
+                <p className="subtitle">
+                  Status: {bagnonIntegrityReport.status} | Stage: {bagnonIntegrityReport.stage}
+                </p>
+                {bagnonIntegrityReport.reason ? (
+                  <p className="subtitle">Reason: {bagnonIntegrityReport.reason}</p>
+                ) : null}
+                <p className="subtitle">
+                  Totals: stacks {bagnonIntegrityReport.totals?.itemStacks || 0}, item count {bagnonIntegrityReport.totals?.totalItemQuantity || 0},
+                  unique items {bagnonIntegrityReport.totals?.uniqueItems || 0}, owners with items {bagnonIntegrityReport.totals?.ownersWithItems || 0},
+                  snapshot characters {bagnonIntegrityReport.totals?.snapshotCharacters || 0}, equipment profiles {bagnonIntegrityReport.totals?.equipmentProfiles || 0},
+                  character profiles {bagnonIntegrityReport.totals?.characterProfiles || 0}.
+                </p>
+                <p className="subtitle">
+                  Unresolved: profiles {bagnonIntegrityReport.unresolvedProfiles || 0}, items {bagnonIntegrityReport.unresolvedItems || 0}.
+                </p>
+                {Array.isArray(bagnonIntegrityReport.indexedAccountLabels) && bagnonIntegrityReport.indexedAccountLabels.length ? (
+                  <p className="subtitle">
+                    Indexed accounts: {bagnonIntegrityReport.indexedAccountLabels.join(", ")}.
+                  </p>
+                ) : null}
+                {Array.isArray(bagnonIntegrityReport.accountBreakdown) && bagnonIntegrityReport.accountBreakdown.length ? (
+                  <p className="subtitle">
+                    Per-account: {bagnonIntegrityReport.accountBreakdown
+                      .map((entry) => `${entry.accountName}: ${entry.ownersWithItems} owners / ${entry.snapshotCharacters} snapshot`)
+                      .join(" | ")}.
+                  </p>
+                ) : null}
+                {Array.isArray(bagnonIntegrityReport.files) && bagnonIntegrityReport.files.length ? (
+                  <p className="subtitle">
+                    Files: {bagnonIntegrityReport.files
+                      .map((file) => `${file.fileName}:${file.sourceType}:${file.parsedCount}`)
+                      .join(" | ")}.
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
 
             {pendingBagnonConnectHandles.length ? (
               <div className="panel">
@@ -1334,17 +2444,17 @@ function SettingsPage() {
                 <p className="subtitle">
                   {pendingBagnonConnectHandles.length} selected file(s) awaiting confirmation.
                 </p>
-                <select
+                <input
+                  list="account-options-bagnon"
                   value={pendingBagnonAccountName}
                   onChange={(event) => setPendingBagnonAccountName(event.target.value)}
-                >
-                  <option value="">No account</option>
+                  placeholder="Type or select account"
+                />
+                <datalist id="account-options-bagnon">
                   {data.accounts.map((account) => (
-                    <option key={account.id} value={account.battleNetId}>
-                      {account.battleNetId}
-                    </option>
+                    <option key={account.id} value={account.battleNetId} />
                   ))}
-                </select>
+                </datalist>
                 <div className="row-actions">
                   <button type="button" onClick={onConfirmPendingBagnonConnect}>
                     Confirm Connection

@@ -42,6 +42,18 @@ function parseCharacterKey(key) {
   };
 }
 
+function isCharacterTableKey(key) {
+  return /^Default\.[^\.]+\..+/.test(String(key || ""));
+}
+
+function isAnonymousOpen(trimmed) {
+  return /^\{\s*,?\s*$/.test(trimmed);
+}
+
+function isModernInventoryTable(trimmed) {
+  return /^DataStore_Inventory_Characters\s*=\s*\{\s*,?\s*$/.test(trimmed);
+}
+
 function parseLuaValue(raw) {
   const value = String(raw || "")
     .replace(/--.*$/, "")
@@ -166,7 +178,7 @@ export function parseDataStoreInventory(luaText, fileName = "", accountHintName 
       return;
     }
 
-    if (!ctx.name || !ctx.realm) {
+    if (!ctx.name && !Number.isInteger(ctx.characterIndex)) {
       return;
     }
 
@@ -186,8 +198,9 @@ export function parseDataStoreInventory(luaText, fileName = "", accountHintName 
       .sort((a, b) => a.slot - b.slot);
 
     entries.push({
-      characterName: ctx.name,
-      realm: ctx.realm,
+      characterName: ctx.name || "",
+      realm: ctx.realm || "",
+      characterIndex: ctx.characterIndex,
       accountHintName: String(accountHintName || "").trim(),
       sourceFileName: fileName,
       averageItemLevel: typeof ctx.averageItemLvl === "number" ? ctx.averageItemLvl : null,
@@ -200,22 +213,48 @@ export function parseDataStoreInventory(luaText, fileName = "", accountHintName 
   lines.forEach((line) => {
     const trimmed = line.trim();
 
-    const keyedOpen = trimmed.match(/^\["([^"]+)"\]\s*=\s*\{$/);
+    if (isModernInventoryTable(trimmed)) {
+      pushContext({
+        type: "charactersList",
+        key: "DataStore_Inventory_Characters",
+        nextCharacterIndex: 1
+      });
+      return;
+    }
+
+    const parent = stack[stack.length - 1];
+    if (isAnonymousOpen(trimmed) && parent?.type === "charactersList") {
+      pushContext({
+        type: "character",
+        key: `index-${parent.nextCharacterIndex}`,
+        name: "",
+        realm: "",
+        characterIndex: parent.nextCharacterIndex,
+        inventory: [],
+        averageItemLvl: null,
+        overallAIL: null,
+        lastUpdate: null
+      });
+      parent.nextCharacterIndex += 1;
+      return;
+    }
+
+    const keyedOpen = trimmed.match(/^\[['"]([^'"]+)['"]\]\s*=\s*\{\s*,?\s*$/);
     if (keyedOpen) {
       const key = keyedOpen[1];
-      const parent = stack[stack.length - 1];
+      const keyedParent = stack[stack.length - 1];
 
-      if (!parent && key === "global") {
+      if (!keyedParent && key === "global") {
         pushContext({ type: "global", key });
         return;
       }
 
-      if (parent?.type === "global" && key === "Characters") {
+      if (keyedParent?.type === "global" && key === "Characters") {
         pushContext({ type: "characters", key });
         return;
       }
 
-      if (parent?.type === "characters") {
+      if (keyedParent?.type === "characters") {
         const parsed = parseCharacterKey(key);
         pushContext({
           type: "character",
@@ -230,7 +269,22 @@ export function parseDataStoreInventory(luaText, fileName = "", accountHintName 
         return;
       }
 
-      if (parent?.type === "character" && key === "Inventory") {
+      if (!keyedParent && isCharacterTableKey(key)) {
+        const parsed = parseCharacterKey(key);
+        pushContext({
+          type: "character",
+          key,
+          name: parsed.name,
+          realm: parsed.realm,
+          inventory: [],
+          averageItemLvl: null,
+          overallAIL: null,
+          lastUpdate: null
+        });
+        return;
+      }
+
+      if (keyedParent?.type === "character" && key === "Inventory") {
         pushContext({ type: "inventory", key, items: [], nextSlot: 1 });
         return;
       }

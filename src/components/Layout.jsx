@@ -17,7 +17,7 @@ const links = [
 ];
 
 function Layout({ children }) {
-  const { user, isAdmin } = useAuth();
+  const { user, isAdmin, signInWithGoogle, signOutUser } = useAuth();
   const navLinks = isAdmin ? [...links, { to: "/admin", label: "Admin" }] : links;
 
   return (
@@ -27,7 +27,18 @@ function Layout({ children }) {
           <h1>Raid Loot Tracker</h1>
           <p className="subtitle">Who should you raid on next?</p>
         </div>
-        <div className="user-pill">{user ? user.email : "Signed out"}</div>
+        <div className="row-actions">
+          <div className="user-pill">{user ? user.email : "Signed out"}</div>
+          {user ? (
+            <button type="button" className="secondary-btn" onClick={signOutUser}>
+              Sign Out
+            </button>
+          ) : (
+            <button type="button" onClick={signInWithGoogle}>
+              Sign In with Google
+            </button>
+          )}
+        </div>
       </header>
 
       <nav className="nav-bar">

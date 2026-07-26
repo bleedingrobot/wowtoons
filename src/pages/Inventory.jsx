@@ -57,6 +57,42 @@ function InventoryPage() {
     return keys.size;
   }, [inventoryItems]);
 
+  const ownersWithItems = typeof syncMeta?.ownersWithItems === "number"
+    ? syncMeta.ownersWithItems
+    : totalOwners;
+  const snapshotCharacters = typeof syncMeta?.snapshotCharacterCount === "number"
+    ? syncMeta.snapshotCharacterCount
+    : ownersWithItems;
+  const accountBreakdown = useMemo(() => {
+    if (Array.isArray(syncMeta?.accountBreakdown) && syncMeta.accountBreakdown.length) {
+      return syncMeta.accountBreakdown
+        .filter((entry) => entry && typeof entry === "object")
+        .map((entry) => ({
+          accountName: String(entry.accountName || "").trim() || "(unlabeled account)",
+          ownersWithItems: Number(entry.ownersWithItems) || 0,
+          snapshotCharacters: Number(entry.snapshotCharacters) || 0
+        }))
+        .sort((a, b) => a.accountName.localeCompare(b.accountName));
+    }
+
+    const fallback = new Map();
+    inventoryItems.forEach((item) => {
+      const accountName = String(item.accountHintName || "").trim() || "(unlabeled account)";
+      if (!fallback.has(accountName)) {
+        fallback.set(accountName, new Set());
+      }
+      fallback.get(accountName).add(characterKey(item.characterName, item.realm));
+    });
+
+    return [...fallback.entries()]
+      .map(([accountName, owners]) => ({
+        accountName,
+        ownersWithItems: owners.size,
+        snapshotCharacters: owners.size
+      }))
+      .sort((a, b) => a.accountName.localeCompare(b.accountName));
+  }, [inventoryItems, syncMeta]);
+
   const totalStacks = inventoryItems.length;
 
   if (!user) {
@@ -102,10 +138,15 @@ function InventoryPage() {
         parsedItems.push(...items);
       }
 
-      await replaceInventoryItems(user.uid, parsedItems);
-
       const importedCharacters = new Set(parsedItems.map((item) => characterKey(item.characterName, item.realm)));
       const visibleItems = new Set(parsedItems.map((item) => `${item.itemId}|${normalize(item.itemName)}`));
+
+      await replaceInventoryItems(user.uid, parsedItems, {
+        ownersWithItems: importedCharacters.size,
+        snapshotCharacterCount: importedCharacters.size,
+        uniqueItemCount: visibleItems.size,
+        totalItemQuantity: parsedItems.reduce((sum, item) => sum + (Number(item.count) || 0), 0)
+      });
 
       setImportMessage(
         `Imported ${files.length} file(s), ${importedCharacters.size} character(s), and ${visibleItems.size} unique item(s).`
@@ -151,8 +192,12 @@ function InventoryPage() {
 
         <div className="inventory-stats">
           <div>
-            <strong>{totalOwners}</strong>
-            <span>Characters indexed</span>
+            <strong>{snapshotCharacters}</strong>
+            <span>Snapshot characters</span>
+          </div>
+          <div>
+            <strong>{ownersWithItems}</strong>
+            <span>Owners with items</span>
           </div>
           <div>
             <strong>{totalStacks}</strong>
@@ -163,6 +208,11 @@ function InventoryPage() {
         {syncMeta ? (
           <p className="subtitle">
             Last synced: {new Date(syncMeta.syncedAt).toLocaleString()} &mdash; {syncMeta.count} stacks written
+          </p>
+        ) : null}
+        {accountBreakdown.length ? (
+          <p className="subtitle">
+            Per-account: {accountBreakdown.map((entry) => `${entry.accountName}: ${entry.ownersWithItems} owners / ${entry.snapshotCharacters} snapshot`).join(" | ")}
           </p>
         ) : null}
         {importMessage ? <p className="subtitle">{importMessage}</p> : null}

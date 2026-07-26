@@ -14,7 +14,7 @@ function parseCharacterKey(key) {
   const raw = String(key || "").replace(/^Default\./, "");
   const lastDot = raw.lastIndexOf(".");
 
-  if (lastDot === -1) {
+    if (lastDot === -1) {
     return { name: raw, realm: "" };
   }
 
@@ -22,6 +22,28 @@ function parseCharacterKey(key) {
     realm: raw.slice(0, lastDot),
     name: raw.slice(lastDot + 1)
   };
+}
+
+function isCharacterTableKey(key) {
+  return /^Default\.[^\.]+\..+/.test(String(key || ""));
+}
+
+function isAnonymousOpen(trimmed) {
+  return /^\{\s*,?\s*$/.test(trimmed);
+}
+
+function isModernContainersTable(trimmed) {
+  return /^DataStore_Containers_Characters\s*=\s*\{\s*,?\s*$/.test(trimmed);
+}
+
+function parseNumericLuaKey(line) {
+  const match = String(line || "").trim().match(/^\[(-?\d+)\]\s*=\s*\{\s*,?\s*$/);
+  if (!match) {
+    return null;
+  }
+
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function parseItemLink(link) {
@@ -138,6 +160,25 @@ function coerceLinkArray(value) {
   return matches || [];
 }
 
+function decodePackedItemToken(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return { itemId: null, count: null };
+  }
+
+  const packed = Math.trunc(value);
+  const itemId = Math.trunc(packed / 65536);
+  const count = packed % 65536;
+
+  if (itemId <= 0) {
+    return { itemId: packed, count: null };
+  }
+
+  return {
+    itemId,
+    count: count > 0 ? count : null
+  };
+}
+
 function backfillUnknownItemNames(items) {
   const nameById = new Map();
 
@@ -192,22 +233,26 @@ export function parseDataStoreContainers(luaText, fileName = "", accountHintName
     }
 
     const links = coerceLinkArray(ctx.links);
-    const ids = coerceNumericArray(ctx.ids);
+    const usingPackedItems = !ctx.ids && ctx.items;
+    const ids = coerceNumericArray(ctx.ids ?? ctx.items);
     const counts = coerceNumericArray(ctx.counts);
     const maxLength = Math.max(links.length, ids.length, counts.length);
 
     for (let slotIndex = 0; slotIndex < maxLength; slotIndex += 1) {
       const link = links[slotIndex];
-      const itemId = ids[slotIndex];
+      const rawIdToken = ids[slotIndex];
+      const decoded = usingPackedItems
+        ? decodePackedItemToken(rawIdToken)
+        : { itemId: rawIdToken, count: null };
       const count = counts[slotIndex];
 
-      if (!link && !itemId) {
+      if (!link && !decoded.itemId) {
         continue;
       }
 
       const parsed = parseItemLink(link);
       const itemName = parsed.itemName || "Unknown item";
-      const safeItemId = Number.isFinite(itemId) ? itemId : parsed.itemId;
+      const safeItemId = parsed.itemId || decoded.itemId;
 
       if (!itemName || !safeItemId) {
         continue;
@@ -216,11 +261,12 @@ export function parseDataStoreContainers(luaText, fileName = "", accountHintName
       const parsedCount = Number(count);
       const safeCount = Number.isFinite(parsedCount) && parsedCount > 0
         ? parsedCount
-        : parsed.stackCount || 1;
+        : decoded.count || parsed.stackCount || 1;
 
       items.push({
         characterName: ctx.characterName,
         realm: ctx.realm,
+        characterIndex: ctx.characterIndex,
         itemId: safeItemId,
         itemName,
         count: safeCount,
@@ -236,22 +282,62 @@ export function parseDataStoreContainers(luaText, fileName = "", accountHintName
   lines.forEach((line) => {
     const trimmed = line.trim();
 
-    const keyedOpen = trimmed.match(/^\["([^"]+)"\]\s*=\s*\{$/);
+    if (isModernContainersTable(trimmed)) {
+      openContext({
+        type: "charactersList",
+        key: "DataStore_Containers_Characters",
+        nextCharacterIndex: 1
+      });
+      return;
+    }
+
+    const parent = stack[stack.length - 1];
+    if (isAnonymousOpen(trimmed)) {
+      if (parent?.type === "charactersList") {
+        openContext({
+          type: "character",
+          key: `index-${parent.nextCharacterIndex}`,
+          name: "",
+          realm: "",
+          characterIndex: parent.nextCharacterIndex
+        });
+        parent.nextCharacterIndex += 1;
+        return;
+      }
+
+      if (parent?.type === "containers") {
+        const bagIndex = parent.nextBagIndex || 0;
+        parent.nextBagIndex = bagIndex + 1;
+        openContext({
+          type: "bag",
+          key: `Bag${bagIndex}`,
+          bagKey: `Bag${bagIndex}`,
+          bagIndex,
+          group: bagIndex >= 5 ? "bank" : "bags",
+          characterName: parent.characterName,
+          realm: parent.realm,
+          characterIndex: parent.characterIndex
+        });
+        return;
+      }
+    }
+
+    const keyedOpen = trimmed.match(/^\[['"]([^'"]+)['"]\]\s*=\s*\{\s*,?\s*$/);
     if (keyedOpen) {
       const key = keyedOpen[1];
-      const parent = stack[stack.length - 1];
+      const keyedParent = stack[stack.length - 1];
 
-      if (!parent && key === "global") {
+      if (!keyedParent && key === "global") {
         openContext({ type: "global", key });
         return;
       }
 
-      if (parent?.type === "global" && key === "Characters") {
+      if (keyedParent?.type === "global" && key === "Characters") {
         openContext({ type: "characters", key });
         return;
       }
 
-      if (parent?.type === "characters") {
+      if (keyedParent?.type === "characters") {
         const parsed = parseCharacterKey(key);
         openContext({
           type: "character",
@@ -262,17 +348,30 @@ export function parseDataStoreContainers(luaText, fileName = "", accountHintName
         return;
       }
 
-      if (parent?.type === "character" && key === "Containers") {
+      if (!keyedParent && isCharacterTableKey(key)) {
+        const parsed = parseCharacterKey(key);
         openContext({
-          type: "containers",
+          type: "character",
           key,
-          characterName: parent.name,
-          realm: parent.realm
+          name: parsed.name,
+          realm: parsed.realm
         });
         return;
       }
 
-      if (parent?.type === "containers" && /^Bag-?\d+$/.test(key)) {
+      if (keyedParent?.type === "character" && key === "Containers") {
+        openContext({
+          type: "containers",
+          key,
+          characterName: keyedParent.name || keyedParent.characterName || "",
+          realm: keyedParent.realm || "",
+          characterIndex: keyedParent.characterIndex,
+          nextBagIndex: 0
+        });
+        return;
+      }
+
+      if (keyedParent?.type === "containers" && /^Bag-?\d+$/.test(key)) {
         const bagIndex = Number(key.slice(3));
         openContext({
           type: "bag",
@@ -280,13 +379,14 @@ export function parseDataStoreContainers(luaText, fileName = "", accountHintName
           bagKey: key,
           bagIndex,
           group: bagIndex >= 5 ? "bank" : "bags",
-          characterName: parent.characterName,
-          realm: parent.realm
+          characterName: keyedParent.characterName,
+          realm: keyedParent.realm,
+          characterIndex: keyedParent.characterIndex
         });
         return;
       }
 
-      if (parent?.type === "bag" && ["links", "ids", "counts"].includes(key)) {
+      if (keyedParent?.type === "bag" && ["links", "ids", "counts", "items"].includes(key)) {
         openContext({ type: "array", key, values: [] });
         return;
       }
@@ -295,7 +395,40 @@ export function parseDataStoreContainers(luaText, fileName = "", accountHintName
       return;
     }
 
+    const numericOpen = parseNumericLuaKey(trimmed);
+    if (numericOpen !== null) {
+      const keyedParent = stack[stack.length - 1];
+
+      if (keyedParent?.type === "containers") {
+        const bagIndex = numericOpen;
+        openContext({
+          type: "bag",
+          key: `Bag${bagIndex}`,
+          bagKey: `Bag${bagIndex}`,
+          bagIndex,
+          group: bagIndex >= 5 ? "bank" : "bags",
+          characterName: keyedParent.characterName,
+          realm: keyedParent.realm,
+          characterIndex: keyedParent.characterIndex
+        });
+        return;
+      }
+
+      openContext({ type: "object", key: String(numericOpen) });
+      return;
+    }
+
     const current = stack[stack.length - 1];
+    if (current?.type === "bag") {
+      const keyedValueMatch = trimmed.match(/^\[['"]([^'"]+)['"]\]\s*=\s*(.+?)(?:,)?$/);
+      if (keyedValueMatch) {
+        const field = keyedValueMatch[1];
+        if (["links", "ids", "counts", "items"].includes(field)) {
+          current[field] = parseLuaValue(keyedValueMatch[2]);
+        }
+      }
+    }
+
     if (current?.type === "array") {
       parseArrayLine(trimmed, current.values);
     }

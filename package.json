@@ -2,7 +2,7 @@
   "name": "raid-loot-tracker",
   "private": true,
   "version": "0.1.0",
-  "homepage": "https://bleedingrobot.github.io/wowloot/",
+  "homepage": "https://bleedingrobot.github.io/wowtoons/",
   "type": "module",
   "scripts": {
     "dev": "vite",

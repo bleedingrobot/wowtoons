@@ -57,7 +57,7 @@ Detailed data model and structure are in [docs/firebase-schema.md](docs/firebase
 1. This repo is configured with:
 
 ```json
-"homepage": "https://bleedingrobot.github.io/wowloot/"
+"homepage": "https://bleedingrobot.github.io/wowtoons/"
 ```
 
 2. Build and publish:
@@ -70,7 +70,7 @@ This publishes `dist` to the `gh-pages` branch.
 
 Live site URL after deploy:
 
-[Live Site (GitHub Pages)](https://bleedingrobot.github.io/wowloot/)
+[Live Site (GitHub Pages)](https://bleedingrobot.github.io/wowtoons/)
 
 ## Architecture Notes
 

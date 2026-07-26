@@ -52,11 +52,22 @@ export function validateDataStoreSourceHealth({
   const warnings = [];
   const body = String(text || "");
   const label = fileName || "Unknown DataStore file";
+  const looksLikeAddonSource = body.includes("DataStore:RegisterModule")
+    || body.includes("local addonName")
+    || body.includes("## Interface");
+
+  if (sourceType === "core") {
+    return warnings;
+  }
 
   if (sourceType === "containers") {
-    const hasMarker = body.includes("DataStore_ContainersDB");
+    const hasMarker = body.includes("DataStore_ContainersDB")
+      || body.includes("DataStore_Containers_Characters");
     if (!hasMarker) {
-      warnings.push(`${label}: missing DataStore_ContainersDB marker (format may have changed)`);
+      warnings.push(`${label}: missing DataStore containers markers (try WTF/Account/<account>/SavedVariables/DataStore_Containers.lua)`);
+      if (looksLikeAddonSource) {
+        warnings.push(`${label}: this looks like AddOns source code, not SavedVariables character data`);
+      }
     } else if (parsedCount === 0) {
       warnings.push(`${label}: containers DB detected, but no inventory item stacks were parsed`);
     }
@@ -64,9 +75,13 @@ export function validateDataStoreSourceHealth({
   }
 
   if (sourceType === "inventory") {
-    const hasMarker = body.includes("DataStore_InventoryDB");
+    const hasMarker = body.includes("DataStore_InventoryDB")
+      || body.includes("DataStore_Inventory_Characters");
     if (!hasMarker) {
-      warnings.push(`${label}: missing DataStore_InventoryDB marker (format may have changed)`);
+      warnings.push(`${label}: missing DataStore inventory markers (try WTF/Account/<account>/SavedVariables/DataStore_Inventory.lua)`);
+      if (looksLikeAddonSource) {
+        warnings.push(`${label}: this looks like AddOns source code, not SavedVariables character data`);
+      }
     } else if (parsedCount === 0) {
       warnings.push(`${label}: inventory DB detected, but no gear profiles were parsed`);
     }
@@ -74,9 +89,14 @@ export function validateDataStoreSourceHealth({
   }
 
   if (sourceType === "characters") {
-    const hasMarker = body.includes("DataStore_CharactersDB");
+    const hasMarker = body.includes("DataStore_CharactersDB")
+      || body.includes("DataStore_Characters_Characters")
+      || body.includes("DataStore_Characters_Info");
     if (!hasMarker) {
-      warnings.push(`${label}: missing DataStore_CharactersDB marker (format may have changed)`);
+      warnings.push(`${label}: missing DataStore characters markers (try WTF/Account/<account>/SavedVariables/DataStore_Characters.lua)`);
+      if (looksLikeAddonSource) {
+        warnings.push(`${label}: this looks like AddOns source code, not SavedVariables character data`);
+      }
     } else if (parsedCount === 0) {
       warnings.push(`${label}: characters DB detected, but no character profiles were parsed`);
     }
